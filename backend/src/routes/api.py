@@ -4,18 +4,29 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from src.config.settings import ARTIFACTS
 from src.constants.enums import Role
-from src.controllers.query import delivery_status, jobs, recent_activity, require_row, revisions
+from src.controllers.query import (
+    delivery_status, jobs, recent_activity, receipt_revisions, reconciliation_jobs,
+    require_receipt, require_reconciliation, require_row, revisions,
+)
 from src.models.tables import datasets, runs
-from src.schemas.requests import Delivery, Import, Login, Review, Run
+from src.schemas.requests import (
+    Delivery, Import, Login, ReceiptImport, ReconcileRun, Review, Run,
+)
 from src.services.data import PROFILE, csv_records, save_revision
 from src.services.domain import sample_rows
-from src.services.workflow import add_run, cancel_schedule, review_run, schedule_report
+from src.services.receipts import parse_receipts, sample_receipt_rows, save_receipt_revision
+from src.services.workflow import (
+    add_reconciliation, add_run, cancel_schedule, review_run, schedule_report,
+)
 from src.utils.exports import write_csv
 from src.utils.security import allowed, authenticate, signed_in
 
 router = APIRouter()
 analyst = allowed(Role.analyst.value)
 reviewer = allowed(Role.reviewer.value)
+
+RECEIPT_FILENAME = '签收台账样例.csv'
+RECEIPT_HEADER = ['receipt_id', 'loading_bay', 'finished_at']
 
 
 @router.post('/login')
@@ -60,6 +71,65 @@ def import_data(body: Import, account=Depends(analyst)):
     rows = csv_records(body.csv)
     key, created = save_revision(body.name, rows, account['username'])
     return {'id': key, 'created': created, 'rows': len(rows)}
+
+
+@router.get('/receipts')
+def list_receipts(account=Depends(signed_in)):
+    return receipt_revisions()
+
+
+@router.get('/receipts/{key}')
+def get_receipt(key: int, account=Depends(signed_in)):
+    return require_receipt(key)
+
+
+@router.post('/receipts', status_code=201)
+def import_receipts(body: ReceiptImport, account=Depends(analyst)):
+    rows = parse_receipts(body.csv)
+    key, created = save_receipt_revision(body.name, rows, account['username'])
+    return {'id': key, 'created': created, 'rows': len(rows)}
+
+
+@router.get('/receipt-example.csv')
+def receipt_example(account=Depends(signed_in)):
+    return download_csv(write_csv(sample_receipt_rows(), RECEIPT_HEADER, False), RECEIPT_FILENAME)
+
+
+@router.get('/reconciliations')
+def list_reconciliations(account=Depends(signed_in)):
+    return reconciliation_jobs()
+
+
+@router.post('/reconciliations', status_code=202)
+def queue_reconciliation(body: ReconcileRun, account=Depends(analyst)):
+    return add_reconciliation(body, account['username'])
+
+
+@router.get('/reconciliations/{key}')
+def get_reconciliation(key: int, account=Depends(signed_in)):
+    return require_reconciliation(key)
+
+
+@router.get('/reconciliations/{key}/ledger.csv')
+def reconciliation_ledger(key: int, account=Depends(signed_in)):
+    job = require_reconciliation(key)
+    if not job['result']:
+        raise HTTPException(409, '对账结果尚不可导出。')
+    result = job['result']
+    path = ARTIFACTS / f"reconcile-{key}-{job['started'].hex()}.csv"
+    data = path.read_bytes() if path.exists() else write_csv(result['ledger'], result.get('ledger_columns'))
+    return download_csv(data, f'签收对账分析台账-{key}.csv')
+
+
+@router.get('/reconciliations/{key}/fixed.csv')
+def reconciliation_fixed(key: int, account=Depends(signed_in)):
+    job = require_reconciliation(key)
+    if not job['result']:
+        raise HTTPException(409, '对账结果尚不可导出。')
+    result = job['result']
+    path = ARTIFACTS / f"reconcile-{key}-{job['started'].hex()}-fixed.csv"
+    data = path.read_bytes() if path.exists() else write_csv(result['fixed_pairs'], result.get('pair_columns'))
+    return download_csv(data, f'签收对账固定配对-{key}.csv')
 
 
 @router.get('/runs')

@@ -5,7 +5,7 @@ from sqlalchemy import and_, insert, or_, select, update
 
 from src.constants.enums import State
 from src.models.database import add_event, engine, fetch_one
-from src.models.tables import datasets, deliveries, runs, schedules
+from src.models.tables import datasets, deliveries, receipts, reconciliations, runs, schedules
 from src.services.data import parse_options
 
 
@@ -46,6 +46,55 @@ def finish_run(key, claim, result, error):
                                                   error=error, finished=now))
         if saved.rowcount:
             add_event(connection, 'worker', state, key, now)
+
+
+def add_reconciliation(body, actor):
+    """提交一次对账，绑定一个排车批次版本和一个签收台账版本。"""
+    now = time.time()
+    with engine.begin() as connection:
+        if fetch_one(connection, datasets, body.dataset_id) is None:
+            raise HTTPException(404, '排车批次版本不存在。')
+        if fetch_one(connection, receipts, body.receipt_id) is None:
+            raise HTTPException(404, '签收台账版本不存在。')
+        key = connection.execute(insert(reconciliations).values(
+            dataset_id=body.dataset_id, receipt_id=body.receipt_id,
+            state=State.queued.value, owner=actor, created=now)).inserted_primary_key[0]
+        add_event(connection, actor, 'reconcile_queue', key, now)
+    return {'id': key, 'state': State.queued.value}
+
+
+def claim_reconciliation():
+    """认领一个排队（或超时滞留）的对账任务，返回两份台账的规范化记录。"""
+    now = time.time()
+    claimable = or_(reconciliations.c.state == State.queued.value,
+                    and_(reconciliations.c.state == State.running.value,
+                         reconciliations.c.started < now - 120))
+    with engine.begin() as connection:
+        job = connection.execute(select(reconciliations).where(claimable)
+                                 .order_by(reconciliations.c.id).limit(1)).mappings().one_or_none()
+        if job is None:
+            return None
+        key = job['id']
+        claimed = connection.execute(update(reconciliations)
+                                     .where(reconciliations.c.id == key, claimable)
+                                     .values(state=State.running.value, started=now))
+        if claimed.rowcount != 1:
+            return None
+        batch_data = fetch_one(connection, datasets, job['dataset_id'])
+        receipt_data = fetch_one(connection, receipts, job['receipt_id'])
+        return key, now, batch_data['records'], receipt_data['records']
+
+
+def finish_reconciliation(key, claim, result, error):
+    now = time.time()
+    state = State.failed.value if error else State.completed.value
+    with engine.begin() as connection:
+        saved = connection.execute(update(reconciliations)
+                                   .where(reconciliations.c.id == key, reconciliations.c.started == claim,
+                                          reconciliations.c.state == State.running.value)
+                                   .values(state=state, result=result, error=error, finished=now))
+        if saved.rowcount:
+            add_event(connection, 'worker', 'reconcile_' + state, key, now)
 
 
 def review_run(key, body, actor):

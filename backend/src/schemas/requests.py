@@ -19,6 +19,16 @@ class Run(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
+class ReceiptImport(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    csv: str = Field(min_length=1, max_length=1_000_000)
+
+
+class ReconcileRun(BaseModel):
+    dataset_id: int = Field(gt=0)
+    receipt_id: int = Field(gt=0)
+
+
 class Review(BaseModel):
     decision: Literal['approved', 'returned']
     note: str = Field(min_length=2, max_length=1000)

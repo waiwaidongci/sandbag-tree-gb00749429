@@ -7,6 +7,18 @@ datasets = Table('data_revisions', metadata, Column('id', Integer, primary_key=T
                  Column('name', String(180), nullable=False), Column('checksum', String(64), nullable=False, unique=True),
                  Column('records', JSON, nullable=False), Column('owner', String(40), nullable=False),
                  Column('created', Double, nullable=False))
+# 签收单台账：只含单号、装车位、完装时间。同样按规范化内容 SHA-256 去重，换行序不新增版本。
+receipts = Table('receipt_ledgers', metadata, Column('id', Integer, primary_key=True),
+                 Column('name', String(180), nullable=False), Column('checksum', String(64), nullable=False, unique=True),
+                 Column('records', JSON, nullable=False), Column('owner', String(40), nullable=False),
+                 Column('created', Double, nullable=False))
+# 对账任务：绑定一个排车批次版本与一个签收台账版本，结果随版本固化。
+reconciliations = Table('reconcile_runs', metadata, Column('id', Integer, primary_key=True),
+                        Column('dataset_id', Integer, nullable=False, index=True),
+                        Column('receipt_id', Integer, nullable=False, index=True),
+                        Column('state', String(16), nullable=False, index=True), Column('owner', String(40), nullable=False),
+                        Column('created', Double, nullable=False), Column('started', Double), Column('finished', Double),
+                        Column('result', JSON), Column('error', Text))
 runs = Table('analysis_runs', metadata, Column('id', Integer, primary_key=True),
              Column('dataset_id', Integer, nullable=False, index=True), Column('options', JSON, nullable=False),
              Column('state', String(16), nullable=False, index=True), Column('owner', String(40), nullable=False),
